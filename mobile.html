@@ -45,6 +45,8 @@
   .btn-down { right:calc(var(--e) + var(--k) + var(--g)*2); bottom:var(--b); width:var(--k); }
   .btn-left { right:calc(var(--e) + (var(--k) + var(--g)*2) * 2); bottom:var(--b); width:var(--k); }
   .btn-up   { right:calc(var(--e) + var(--k) + var(--g)*2); bottom:calc(var(--b) + var(--k) * 0.9 + var(--g)*2); width:var(--k); }
+  /* ---- exit: drawn by the game (logo-style plate); this is just its invisible tap area ---- */
+  #exit{ position:absolute; z-index:6; }
 
   canvas{ display:block; width:100%; height:100%; image-rendering:pixelated; }
   .pixel-font{ font-family:'Courier New', monospace; letter-spacing:1px; font-weight:bold; }
@@ -1686,6 +1688,26 @@ function beginFit(){                    // scale menu content so all of it sits 
   ctx.save(); ctx.translate(W/2, H/2); ctx.scale(s, s); ctx.translate(-W/2, -H/2);
 }
 function endFit(){ ctx.restore(); }
+// ---- EXIT button: a mini logo plate pinned to the visible top-left corner ----
+const EXIT_BTN = {x:12, y:10, w:92, h:30, sk:11};
+let exitArmedAt = 0;
+function exitArmed(){ return exitArmedAt && performance.now() - exitArmedAt < 2000; }
+function exitVisible(){ return state===STATE.LEVEL_SELECT || state===STATE.GAMEOVER; }   // only on the level select and high scores
+function drawExitButton(){
+  if(!exitVisible()) return;
+  const armed = exitArmed(), B = EXIT_BTN, x = Math.round(VIEW.x + B.x), y = Math.round(VIEW.y + B.y);
+  const poly = (pts, col)=>{ ctx.fillStyle=col; ctx.beginPath(); ctx.moveTo(pts[0][0],pts[0][1]); for(const p of pts.slice(1)) ctx.lineTo(p[0],p[1]); ctx.closePath(); ctx.fill(); };
+  ctx.save();
+  poly([[x+B.sk-2,y+3],[x+B.w+B.sk+2,y+3],[x+B.w+2,y+B.h+6],[x-2,y+B.h+6]], '#1b1030');                   // dark outline
+  poly([[x+B.sk,y+5],[x+B.w+B.sk,y+5],[x+B.w,y+B.h+5],[x,y+B.h+5]], '#4a1aa0');                           // purple underside
+  const flash = armed && Math.floor(performance.now()/120)%2===0;
+  poly([[x+B.sk,y],[x+B.w+B.sk,y],[x+B.w,y+B.h],[x,y+B.h]], armed ? (flash ? '#ff6a8f' : '#ff3f6f') : '#17bfc4');   // teal plate (red when armed)
+  if(!armed){ ctx.fillStyle = '#0f9aa6';                                                               // checker dither on the right end
+    for(let yy=0; yy<B.h; yy+=4) for(let xx=0; xx<16; xx+=4) if(((xx+yy)/4|0)%2===0) ctx.fillRect(x + B.w - 18 + xx + B.sk*(1-yy/B.h), y+yy, 4, 4); }
+  poly([[x+B.sk*0.6, y+B.h*0.72],[x+B.w+B.sk*0.6, y+B.h*0.58],[x+B.w+B.sk*0.55, y+B.h*0.68],[x+B.sk*0.55, y+B.h*0.82]], armed ? '#fff2d6' : '#ff2d8f');   // swoosh
+  ctx.restore();
+  drawBigPF(armed ? 'SURE?' : 'EXIT', x + B.w/2 + B.sk/2, y + B.h/2 - 1, 2, null, armed ? 1 + Math.sin(performance.now()/90)*0.04 : 1, 1);
+}
 function visibleBottomWorld(){ return CAMERA_FOCUS_Y + (H - VIEW.y - CAMERA_FOCUS_Y)/CAMERA_PLAY_ZOOM; }
 function drawHUD(){
   // translucent backing panel so HUD stays legible over busy art
@@ -2473,6 +2495,29 @@ function drawPot(){
 /* ============================== SCORE ENTRY / GAME OVER ============================== */
 let highScores = [];
 try{ highScores = JSON.parse(localStorage.getItem('surfinDogsScores')||'[]'); }catch(e){ highScores=[]; }
+// ---- shared worldwide leaderboard (Firebase Firestore, via its REST API -- no extra libraries) ----
+const FIREBASE = { apiKey:'AIzaSyCXQMfN1b-oe0ynvF226rv9y79InmHQs40', projectId:'surfin-dogs' };
+const FS_BASE = 'https://firestore.googleapis.com/v1/projects/'+FIREBASE.projectId+'/databases/(default)/documents';
+let globalScores = null, scoresStatus = 'idle', lastEntry = null;      // status: idle | loading | ok | offline
+async function fetchGlobalScores(){
+  scoresStatus = 'loading';
+  try{
+    const r = await fetch(FS_BASE+':runQuery?key='+FIREBASE.apiKey, {method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({structuredQuery:{from:[{collectionId:'scores'}], orderBy:[{field:{fieldPath:'score'}, direction:'DESCENDING'}], limit:10}})});
+    if(!r.ok) throw new Error(r.status);
+    const rows = await r.json();
+    globalScores = rows.filter(x=>x.document && x.document.fields).map(x=>({
+      name: x.document.fields.name.stringValue, score: parseInt(x.document.fields.score.integerValue, 10) }));
+    scoresStatus = 'ok';
+  }catch(e){ scoresStatus = 'offline'; }
+}
+async function postGlobalScore(name, score){
+  try{
+    await fetch(FS_BASE+'/scores?key='+FIREBASE.apiKey, {method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({fields:{ name:{stringValue:name}, score:{integerValue:String(score)} }})});
+  }catch(e){}
+}
+fetchGlobalScores();                                   // have the worldwide list ready before anyone needs it
 let initials = ['A','A','A'];
 let initialsIdx = 0;
 
@@ -2491,10 +2536,14 @@ function updateEnterScore(dt){
   if(pressedOnce(' ') || pressedOnce('Enter')){
     if(initialsIdx<2){ initialsIdx++; }
     else {
-      highScores.push({name:initials.join(''), score:Math.floor(game.score)});
+      const entry = {name:initials.join(''), score:Math.max(0, Math.min(1000000, Math.floor(game.score)))};
+      lastEntry = entry;
+      highScores.push(entry);
       highScores.sort((a,b)=>b.score-a.score);
       highScores = highScores.slice(0,10);
-      localStorage.setItem('surfinDogsScores', JSON.stringify(highScores));
+      try{ localStorage.setItem('surfinDogsScores', JSON.stringify(highScores)); }catch(e){}   // some browsers refuse storage; keep going
+      scoresStatus = 'loading';
+      postGlobalScore(entry.name, entry.score).then(fetchGlobalScores);                    // save worldwide, then show the fresh list
       state = STATE.GAMEOVER; stateTime=0;
     }
   }
@@ -2520,9 +2569,17 @@ function drawGameOver(){
   drawBeachBG(0, runTime);
   ctx.fillStyle='rgba(10,10,30,0.65)'; ctx.fillRect(0,0,W,H);
   drawPixelText('HIGH SCORES', W/2, 60, 30, '#ffcf3f','center');
-  highScores.slice(0,8).forEach((s,i)=>{
-    drawPixelText(`${i+1}. ${s.name}`, W/2-100, 110+i*30, 18, '#ffffff','left');
-    drawPixelText(`${s.score}`, W/2+100, 110+i*30, 18, '#1fd3b0','right');
+  const worldwide = scoresStatus==='ok' && globalScores;
+  const list = worldwide ? globalScores : highScores;
+  drawPixelText(scoresStatus==='loading' ? 'LOADING...' : worldwide ? 'WORLDWIDE' : 'THIS DEVICE', W/2, 92, 13, worldwide ? '#1fd3b0' : '#a9c7e8', 'center');
+  let marked = false;
+  list.slice(0,10).forEach((s,i)=>{
+    const mine = !marked && lastEntry && s.name===lastEntry.name && s.score===lastEntry.score;   // your new entry, in gold
+    if(mine) marked = true;
+    const col = mine ? '#ffcf3f' : '#ffffff', y = 122+i*30;
+    if(mine && Math.floor(runTime*3)%2===0) drawPixelText('>', W/2-128, y, 18, '#ffcf3f','left');
+    drawPixelText(`${i+1}. ${s.name}`, W/2-100, y, 18, col,'left');
+    drawPixelText(`${s.score}`, W/2+100, y, 18, mine ? '#ffcf3f' : '#1fd3b0','right');
   });
   if(Math.floor(stateTime*2)%2===0){
     drawPixelText('PRESS START TO PLAY AGAIN', W/2, H-50, 18, '#ffffff','center');
@@ -2810,6 +2867,7 @@ function draw(){
     case STATE.ENTER_SCORE: drawEnterScore(); break;
     case STATE.GAMEOVER: drawGameOver(); break;
   }
+  drawExitButton();
 }
 
 /* ============================== TOUCH CONTROLS (mobile build) ============================== */
@@ -2836,7 +2894,22 @@ function draw(){
     }
   }
   const MENU_TAP = ()=>[STATE.TITLE, STATE.STORY, STATE.INSTRUCTIONS, STATE.POT_WIN].includes(state);
+  // EXIT: first tap arms it, a second tap within 2s leaves for the main site
+  const EXIT_URL = 'https://bryceschneider.com/';
+  const exitEl = document.createElement('div'); exitEl.id = 'exit';
+  document.getElementById('wrap').appendChild(exitEl);
+  function exitTap(){
+    if(!exitVisible()) return;
+    try{ window.top.location.href = EXIT_URL; }catch(err){ window.location.href = EXIT_URL; }   // one tap: straight to the main site
+  }
+  exitEl.addEventListener('click', exitTap);
   function onTouch(e){
+    if(e.type==='touchstart'){                                           // the exit pill takes its own taps
+      for(const t of e.changedTouches){
+        const el = document.elementFromPoint(t.clientX, t.clientY);
+        if(el && el.closest && el.closest('#exit')){ exitTap(); if(e.cancelable) e.preventDefault(); return; }
+      }
+    }
     for(const t of e.changedTouches){
       if(e.type==='touchend' || e.type==='touchcancel'){ held.delete(t.identifier); continue; }
       const k = keyAt(t.clientX, t.clientY);
@@ -2861,6 +2934,7 @@ function draw(){
   (function showWhenNeeded(){
     const hide = state===STATE.TITLE || state===STATE.STORY;
     if(hide !== layer.hidden){ layer.hidden = hide; if(hide){ held.clear(); sync(); } }
+    const ev = exitVisible(); exitEl.style.display = ev ? '' : 'none'; if(!ev) exitArmedAt = 0;   // no tap area where the button isn't shown
     requestAnimationFrame(showWhenNeeded);
   })();
   // size the game to COVER the screen (no black bars), and record the cropped margins in VIEW
@@ -2874,6 +2948,10 @@ function draw(){
     else      { const st = Math.min(MAX_STRETCH, R/A); sy = Sh/H; sx = sy/st; }   // tablets: heighten a little, crop the rest off the sides
     stageEl.style.width = (W*sx)+'px'; stageEl.style.height = (H*sy)+'px';
     VIEW.x = Math.max(0, (W - Lw/sx)/2); VIEW.y = Math.max(0, (H - Sh/sy)/2);
+    // line the invisible tap area up exactly with the drawn EXIT button (a little generous for thumbs)
+    const offX = (Lw - W*sx)/2, offY = (Sh - H*sy)/2, B = EXIT_BTN, pad = 6;
+    exitEl.style.left = (offX + (VIEW.x + B.x)*sx - pad)+'px'; exitEl.style.top = (offY + (VIEW.y + B.y)*sy - pad)+'px';
+    exitEl.style.width = ((B.w + B.sk)*sx + pad*2)+'px';      exitEl.style.height = ((B.h + 6)*sy + pad*2)+'px';
   }
   layout();
   addEventListener('resize', layout);

@@ -2431,6 +2431,29 @@ function drawPot(){
 /* ============================== SCORE ENTRY / GAME OVER ============================== */
 let highScores = [];
 try{ highScores = JSON.parse(localStorage.getItem('surfinDogsScores')||'[]'); }catch(e){ highScores=[]; }
+// ---- shared worldwide leaderboard (Firebase Firestore, via its REST API -- no extra libraries) ----
+const FIREBASE = { apiKey:'AIzaSyCXQMfN1b-oe0ynvF226rv9y79InmHQs40', projectId:'surfin-dogs' };
+const FS_BASE = 'https://firestore.googleapis.com/v1/projects/'+FIREBASE.projectId+'/databases/(default)/documents';
+let globalScores = null, scoresStatus = 'idle', lastEntry = null;      // status: idle | loading | ok | offline
+async function fetchGlobalScores(){
+  scoresStatus = 'loading';
+  try{
+    const r = await fetch(FS_BASE+':runQuery?key='+FIREBASE.apiKey, {method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({structuredQuery:{from:[{collectionId:'scores'}], orderBy:[{field:{fieldPath:'score'}, direction:'DESCENDING'}], limit:10}})});
+    if(!r.ok) throw new Error(r.status);
+    const rows = await r.json();
+    globalScores = rows.filter(x=>x.document && x.document.fields).map(x=>({
+      name: x.document.fields.name.stringValue, score: parseInt(x.document.fields.score.integerValue, 10) }));
+    scoresStatus = 'ok';
+  }catch(e){ scoresStatus = 'offline'; }
+}
+async function postGlobalScore(name, score){
+  try{
+    await fetch(FS_BASE+'/scores?key='+FIREBASE.apiKey, {method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({fields:{ name:{stringValue:name}, score:{integerValue:String(score)} }})});
+  }catch(e){}
+}
+fetchGlobalScores();                                   // have the worldwide list ready before anyone needs it
 let initials = ['A','A','A'];
 let initialsIdx = 0;
 
@@ -2449,10 +2472,14 @@ function updateEnterScore(dt){
   if(pressedOnce(' ') || pressedOnce('Enter')){
     if(initialsIdx<2){ initialsIdx++; }
     else {
-      highScores.push({name:initials.join(''), score:Math.floor(game.score)});
+      const entry = {name:initials.join(''), score:Math.max(0, Math.min(1000000, Math.floor(game.score)))};
+      lastEntry = entry;
+      highScores.push(entry);
       highScores.sort((a,b)=>b.score-a.score);
       highScores = highScores.slice(0,10);
-      localStorage.setItem('surfinDogsScores', JSON.stringify(highScores));
+      try{ localStorage.setItem('surfinDogsScores', JSON.stringify(highScores)); }catch(e){}   // some browsers refuse storage; keep going
+      scoresStatus = 'loading';
+      postGlobalScore(entry.name, entry.score).then(fetchGlobalScores);                    // save worldwide, then show the fresh list
       state = STATE.GAMEOVER; stateTime=0;
     }
   }
@@ -2478,9 +2505,17 @@ function drawGameOver(){
   drawBeachBG(0, runTime);
   ctx.fillStyle='rgba(10,10,30,0.65)'; ctx.fillRect(0,0,W,H);
   drawPixelText('HIGH SCORES', W/2, 60, 30, '#ffcf3f','center');
-  highScores.slice(0,8).forEach((s,i)=>{
-    drawPixelText(`${i+1}. ${s.name}`, W/2-100, 110+i*30, 18, '#ffffff','left');
-    drawPixelText(`${s.score}`, W/2+100, 110+i*30, 18, '#1fd3b0','right');
+  const worldwide = scoresStatus==='ok' && globalScores;
+  const list = worldwide ? globalScores : highScores;
+  drawPixelText(scoresStatus==='loading' ? 'LOADING...' : worldwide ? 'WORLDWIDE' : 'THIS DEVICE', W/2, 92, 13, worldwide ? '#1fd3b0' : '#a9c7e8', 'center');
+  let marked = false;
+  list.slice(0,10).forEach((s,i)=>{
+    const mine = !marked && lastEntry && s.name===lastEntry.name && s.score===lastEntry.score;   // your new entry, in gold
+    if(mine) marked = true;
+    const col = mine ? '#ffcf3f' : '#ffffff', y = 122+i*30;
+    if(mine && Math.floor(runTime*3)%2===0) drawPixelText('>', W/2-128, y, 18, '#ffcf3f','left');
+    drawPixelText(`${i+1}. ${s.name}`, W/2-100, y, 18, col,'left');
+    drawPixelText(`${s.score}`, W/2+100, y, 18, mine ? '#ffcf3f' : '#1fd3b0','right');
   });
   if(Math.floor(stateTime*2)%2===0){
     drawPixelText('PRESS START TO PLAY AGAIN', W/2, H-50, 18, '#ffffff','center');
