@@ -1,0 +1,2 @@
+/*
+  Content-Security-Policy: frame-ancestors https://bryceschneider.com https://www.bryceschneider.com https://*.cargo.site
